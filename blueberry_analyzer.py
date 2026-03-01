@@ -1,256 +1,510 @@
+# -*- coding: utf-8 -*-
+"""
+蓝莓产量分析全流程系统 (项目0227 集成版)
+模板参考: blueberry_analyzer.py | 流程整合: p1~p9
+"""
 import streamlit as st
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import scipy.stats as stats
+from scipy.stats import kstest, pearsonr
+import warnings
+import time
 
-# ---------------------- 1. 页面基础配置 ----------------------
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LassoCV
+from sklearn.neural_network import MLPRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.base import BaseEstimator, RegressorMixin
+
+warnings.filterwarnings('ignore')
+
+# 尝试导入 xgboost / lightgbm（可选）
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+try:
+    from lightgbm import LGBMRegressor
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
+
+# ---------------------- 1. 页面配置与绘图风格 ----------------------
 st.set_page_config(
-    page_title="蓝莓产量分析与预测系统",
+    page_title="蓝莓产量分析全流程系统",
     page_icon="🫐",
     layout="wide"
 )
 
-# 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei']
+# 统一绘图风格（美化）
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['axes.facecolor'] = '#fafafa'
+plt.rcParams['axes.edgecolor'] = '#333333'
+plt.rcParams['grid.alpha'] = 0.4
+plt.rcParams['axes.linewidth'] = 1.0
+COLOR_PALETTE = ['#2E86AB', '#E94B3C', '#4CAF50', '#FF9800', '#9C27B0', '#00BCD4']
+sns.set_palette(COLOR_PALETTE)
 
-# ---------------------- 2. 标题与说明 ----------------------
-st.title("🫐 蓝莓产量分析与预测系统")
-st.markdown("### 上传数据集 → 选择变量 → 查看直方图/箱线图 → 建模预测")
+# 项目默认路径（无上传时使用）
+DEFAULT_DATA_PATH = r'D:\桌面\毕业论文\项目0227'
+FEATURE_ORDER = [
+    'clonesize', 'honeybee', 'bumbles', 'andrena', 'osmia',
+    'MaxOfUpperTRange', 'MinOfUpperTRange', 'AverageOfUpperTRange',
+    'MaxOfLowerTRange', 'MinOfLowerTRange', 'AverageOfLowerTRange',
+    'RainingDays', 'AverageRainingDays', 'fruitset', 'fruitmass', 'seeds', 'yield'
+]
+NORMAL_APPROX = [
+    'clonesize', 'andrena', 'osmia',
+    'MaxOfUpperTRange', 'MinOfUpperTRange', 'AverageOfUpperTRange',
+    'MaxOfLowerTRange', 'MinOfLowerTRange', 'AverageOfLowerTRange',
+    'RainingDays', 'AverageRainingDays',
+    'fruitset', 'fruitmass', 'seeds', 'yield'
+]
+NON_NORMAL = ['honeybee', 'bumbles']
 
-# ---------------------- 3. 初始化会话状态（替代global，更安全） ----------------------
-# 用Streamlit的session_state存储关键变量，避免全局变量问题
-if 'numeric_cols' not in st.session_state:
-    st.session_state.numeric_cols = []
-if 'fill_rules' not in st.session_state:
-    st.session_state.fill_rules = {}
-if 'scaler' not in st.session_state:
-    st.session_state.scaler = StandardScaler()
-if 'model' not in st.session_state:
-    st.session_state.model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-if 'model_trained' not in st.session_state:
-    st.session_state.model_trained = False
+# ---------------------- 2. 会话状态初始化 ----------------------
+def init_session():
+    for key, val in [
+        ('df', None), ('train_df', None), ('test_df', None), ('train_clean', None),
+        ('numeric_cols', []), ('scaler', None), ('pca', None), ('selector', None),
+        ('X_train_pca', None), ('X_test_pca', None), ('y_train', None), ('y_test', None),
+        ('best_model', None), ('best_model_name', None), ('model_trained', False),
+        ('fill_rules', {}), ('train_stats', {}), ('outlier_done', False), ('dim_done', False),
+        ('pred_feature_cols', []), ('y_pred', None)
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = val
 
-# ---------------------- 4. 数据上传 + 去Unnamed列 ----------------------
-uploaded_file = st.file_uploader("选择CSV格式的蓝莓数据集", type="csv")
+init_session()
+
+# ---------------------- 3. 数据加载（上传或默认路径） ----------------------
+st.title("🫐 蓝莓产量分析全流程系统（项目0227 集成版）")
+st.markdown("上传数据或使用默认数据 → 划分 → 描述统计/箱线图 → 正态性/异常值 → 相关性 → 降维 → 多模型对比 → 预测")
+
+uploaded_file = st.file_uploader("选择 CSV 蓝莓数据集（不选则使用项目默认 data.csv）", type="csv")
 if uploaded_file is not None:
-    # 读取数据并剔除Unnamed列
     df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+else:
+    import os
+    default_file = os.path.join(DEFAULT_DATA_PATH, 'data.csv')
+    if os.path.isfile(default_file):
+        df = pd.read_csv(default_file, encoding='utf-8-sig')
+        st.info("已使用默认数据：`data.csv`")
+    else:
+        df = None
+        st.warning("未上传文件且默认路径下无 data.csv，请上传 CSV。")
+
+if df is not None:
     df = df.loc[:, ~df.columns.str.startswith('Unnamed')]
-    st.success("✅ 数据上传成功（已自动剔除无意义的Unnamed列）！")
+    df = df.drop(["id"], axis=1, errors='ignore')
+    st.session_state.df = df
 
-    # 显示数据预览
-    st.subheader("1. 数据预览")
-    st.dataframe(df.head(10), use_container_width=True)
-
-    # ---------------------- 核心修改：用session_state存储特征列表（无global） ----------------------
-    # 筛选数值型列（训练/预测共用）
-    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    # 移除yield列（标签列，非特征）
-    if 'yield' in numeric_cols:
-        numeric_cols.remove('yield')
-    # 存入session_state，后续所有模块共用
+    numeric_cols = [c for c in FEATURE_ORDER if c in df.columns]
+    if 'yield' in numeric_cols and len(numeric_cols) > 1:
+        feature_cols = [c for c in numeric_cols if c != 'yield']
+    else:
+        feature_cols = numeric_cols
     st.session_state.numeric_cols = numeric_cols
 
-    if not numeric_cols:
-        st.error("⚠️ 数据中无数值型特征变量，无法进行统计和建模！")
+    st.subheader("1️⃣ 数据预览与划分")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.dataframe(df.head(10), use_container_width=True)
+    with col_b:
+        test_ratio = st.slider("测试集比例", 0.1, 0.4, 0.3, 0.05)
+        if st.button("划分训练集/测试集", type="primary"):
+            train_df, test_df = train_test_split(
+                df, test_size=test_ratio, random_state=42, shuffle=True
+            )
+            st.session_state.train_df = train_df
+            st.session_state.test_df = test_df
+            st.success(f"划分完成：训练集 {len(train_df)} 条，测试集 {len(test_df)} 条")
+
+    train_df = st.session_state.train_df
+    test_df = st.session_state.test_df
+    if train_df is None or test_df is None:
+        st.stop()
+
+    # ---------------------- 4. 描述性统计 ----------------------
+    st.subheader("2️⃣ 描述性统计")
+    desc = df[feature_cols].describe().T
+    desc['中位数'] = [round(df[col].median(), 4) for col in feature_cols]
+    desc['偏度'] = [round(df[col].skew(), 3) for col in feature_cols]
+    desc['峰度'] = [round(df[col].kurt(), 3) for col in feature_cols]
+    desc['变异系数'] = [round(desc.loc[col, 'std'] / desc.loc[col, 'mean'], 4) if desc.loc[col, 'mean'] != 0 else 0 for col in feature_cols]
+    st.dataframe(desc.style.background_gradient(subset=['mean', 'std'], cmap='Blues').format("{:.4f}", subset=desc.columns), use_container_width=True)
+
+    # ---------------------- 5. 箱线图（美化） ----------------------
+    st.subheader("3️⃣ 箱线图")
+    box_var = st.selectbox("选择变量绘制箱线图", options=feature_cols, index=0)
+    fig_box, ax_box = plt.subplots(figsize=(8, 4))
+    bp = ax_box.boxplot(
+        df[box_var].dropna(), patch_artist=True,
+        boxprops=dict(facecolor='#2E86AB', color='#1a5276', linewidth=1.2),
+        whiskerprops=dict(color='#1a5276'),
+        capprops=dict(color='#1a5276'),
+        medianprops=dict(color='#E94B3C', linewidth=2),
+        flierprops=dict(marker='o', markerfacecolor='#95a5a6', markersize=4, alpha=0.7)
+    )
+    ax_box.set_ylabel("数值", fontsize=11)
+    ax_box.set_title(f"{box_var} 箱线图（中位数：{df[box_var].median():.2f}）", fontsize=12, fontweight='bold')
+    ax_box.grid(axis='y', alpha=0.4, linestyle='--')
+    ax_box.set_facecolor('#fafafa')
+    plt.tight_layout()
+    st.pyplot(fig_box)
+    plt.close()
+
+    # ---------------------- 6. 直方图 + 核密度 + Q-Q（美化） ----------------------
+    st.subheader("4️⃣ 正态性可视化（直方图 / 核密度 / Q-Q）")
+    norm_var = st.selectbox("选择变量", options=feature_cols, index=0, key="norm_var")
+    col1, col2 = st.columns(2)
+    with col1:
+        fig_hist, ax_hist = plt.subplots(figsize=(7, 4))
+        data = train_df[norm_var].dropna()
+        ax_hist.hist(data, bins=28, density=True, alpha=0.7, color='#4CAF50', edgecolor='white', linewidth=0.5)
+        data.plot(kind='kde', ax=ax_hist, color='#E94B3C', linewidth=2, label='核密度')
+        mu, sigma = data.mean(), data.std()
+        x = np.linspace(data.min(), data.max(), 200)
+        ax_hist.plot(x, stats.norm.pdf(x, mu, sigma), 'b--', linewidth=1.5, label='正态拟合')
+        ax_hist.set_title(f'{norm_var} 分布', fontsize=12, fontweight='bold')
+        ax_hist.set_xlabel(norm_var, fontsize=10)
+        ax_hist.set_ylabel('密度', fontsize=10)
+        ax_hist.legend(fontsize=9)
+        ax_hist.grid(alpha=0.4, linestyle='--')
+        ax_hist.set_facecolor('#fafafa')
+        plt.tight_layout()
+        st.pyplot(fig_hist)
+        plt.close()
+    with col2:
+        fig_qq, ax_qq = plt.subplots(figsize=(7, 4))
+        stats.probplot(train_df[norm_var].dropna(), plot=ax_qq, rvalue=True)
+        ax_qq.set_title(f'{norm_var} Q-Q 图', fontsize=12, fontweight='bold')
+        ax_qq.set_xlabel('理论分位数', fontsize=10)
+        ax_qq.set_ylabel('样本分位数', fontsize=10)
+        ax_qq.grid(alpha=0.4, linestyle='--')
+        ax_qq.set_facecolor('#fafafa')
+        plt.tight_layout()
+        st.pyplot(fig_qq)
+        plt.close()
+
+    # ---------------------- 7. KS 与综合正态性 ----------------------
+    st.subheader("5️⃣ 正态性检验（K-S + 综合判断）")
+    norm_results = []
+    for col in feature_cols + (['yield'] if 'yield' in df.columns else []):
+        c = col
+        if c not in train_df.columns:
+            continue
+        data = train_df[c].dropna()
+        if len(data) < 3:
+            continue
+        skewness = data.skew()
+        kurtosis = data.kurt()
+        mu, std = data.mean(), data.std()
+        ks_stat, p_value = kstest(data, 'norm', args=(mu, std))
+        (_, _), (_, _, r_sq) = stats.probplot(data, dist='norm', plot=None)
+        qq_fit = "非常好" if r_sq > 0.95 else ("好" if r_sq > 0.9 else ("中等" if r_sq > 0.8 else "差"))
+        if abs(skewness) < 1 and abs(kurtosis) < 1 and r_sq > 0.9:
+            judge = "正态"
+        elif abs(skewness) < 2 and abs(kurtosis) < 2 and r_sq > 0.8:
+            judge = "近似正态"
+        else:
+            judge = "非正态"
+        norm_results.append({
+            '变量': c, '偏度': round(skewness, 3), '峰度': round(kurtosis, 3),
+            'KS统计量': round(ks_stat, 4), 'K-S p值': round(p_value, 4),
+            'QQ图R²': round(r_sq, 4), 'QQ拟合': qq_fit, '综合判断': judge
+        })
+    st.dataframe(pd.DataFrame(norm_results), use_container_width=True)
+
+    # ---------------------- 8. 异常值处理 ----------------------
+    st.subheader("6️⃣ 异常值处理（3σ / IQR）")
+    if st.button("执行异常值处理（训练集删除，测试集仅标记）"):
+        train_outlier_mask = pd.DataFrame(False, index=train_df.index, columns=train_df.columns)
+        train_stats = {}
+
+        for col in NORMAL_APPROX:
+            if col not in train_df.columns:
+                continue
+            data = train_df[col].dropna()
+            if len(data) == 0:
+                continue
+            mean, std = data.mean(), data.std()
+            train_stats[col] = {"type": "normal", "mean": mean, "std": std}
+            lo, hi = mean - 3 * std, mean + 3 * std
+            train_outlier_mask.loc[data.index, col] = (data < lo) | (data > hi)
+
+        for col in NON_NORMAL:
+            if col not in train_df.columns:
+                continue
+            data = train_df[col].dropna()
+            if len(data) == 0:
+                continue
+            Q1, Q3 = data.quantile(0.25), data.quantile(0.75)
+            IQR = Q3 - Q1
+            train_stats[col] = {"type": "non_normal", "Q1": Q1, "Q3": Q3, "IQR": IQR}
+            lo, hi = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
+            train_outlier_mask.loc[data.index, col] = (data < lo) | (data > hi)
+
+        drop_mask = train_outlier_mask.any(axis=1)
+        train_clean = train_df[~drop_mask].copy()
+        st.session_state.train_clean = train_clean
+        st.session_state.train_stats = train_stats
+        st.session_state.outlier_done = True
+        st.success(f"训练集清洗完成：删除 {drop_mask.sum()} 行，保留 {len(train_clean)} 行")
+
+    train_clean = st.session_state.train_clean
+    if train_clean is None:
+        train_clean = train_df
+    corr_df = train_clean
+
+    # ---------------------- 9. 相关性热力图（美化） ----------------------
+    st.subheader("7️⃣ 特征相关性热力图")
+    corr_cols = [c for c in feature_cols + ['yield'] if c in corr_df.columns]
+    corr_matrix = corr_df[corr_cols].dropna().corr().round(2)
+
+    fig_corr, ax_corr = plt.subplots(figsize=(11, 9))
+    cmap = sns.diverging_palette(240, 10, as_cmap=True)
+    sns.heatmap(
+        corr_matrix, ax=ax_corr, cmap=cmap, annot=True, fmt='.2f',
+        vmin=-1, vmax=1, center=0, square=True, linewidths=0.5,
+        cbar_kws={'shrink': 0.8, 'label': 'Pearson 相关系数'},
+        annot_kws={'size': 8}
+    )
+    ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9)
+    ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
+    ax_corr.set_title("特征相关性热力图（训练集）", fontsize=14, fontweight='bold', pad=12)
+    plt.tight_layout()
+    st.pyplot(fig_corr)
+    plt.close()
+
+    # ---------------------- 10. 降维（标准化 + PCA / SelectKBest） ----------------------
+    st.subheader("8️⃣ 降维（标准化 → PCA / SelectKBest）")
+    target_col = 'yield'
+    X_tr = corr_df.drop(target_col, axis=1, errors='ignore')
+    X_tr = X_tr[[c for c in FEATURE_ORDER if c in X_tr.columns and c != target_col]]
+    y_tr = corr_df[target_col]
+    X_te = test_df.drop(target_col, axis=1, errors='ignore')
+    X_te = X_te[X_tr.columns]
+    y_te = test_df[target_col]
+
+    scaler = StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s = scaler.transform(X_te)
+    st.session_state.scaler = scaler
+    st.session_state.fill_rules = {c: float(X_tr[c].median()) for c in X_tr.columns}
+
+    dim_method = st.radio("降维方式", ["PCA（保留 80% 方差）", "SelectKBest（Top 10）"], index=0)
+    if st.button("执行降维"):
+        if "PCA" in dim_method:
+            pca = PCA(n_components=0.8, random_state=42)
+            X_train_pca = pca.fit_transform(X_tr_s)
+            X_test_pca = pca.transform(X_te_s)
+            st.session_state.pca = pca
+            st.session_state.selector = None
+        else:
+            k_best = min(10, X_tr_s.shape[1])
+            selector = SelectKBest(score_func=f_regression, k=k_best)
+            X_train_pca = selector.fit_transform(X_tr_s, y_tr)
+            X_test_pca = selector.transform(X_te_s)
+            st.session_state.selector = selector
+            st.session_state.pca = None
+        st.session_state.X_train_pca = X_train_pca
+        st.session_state.X_test_pca = X_test_pca
+        st.session_state.y_train = y_tr.values
+        st.session_state.y_test = y_te.values
+        st.session_state.pred_feature_cols = list(X_tr.columns)
+        st.session_state.dim_done = True
+        st.success(f"降维完成：训练 {X_train_pca.shape}，测试 {X_test_pca.shape}")
+
+    if st.session_state.dim_done:
+        X_train_pca = st.session_state.X_train_pca
+        X_test_pca = st.session_state.X_test_pca
+        y_train = st.session_state.y_train
+        y_test = st.session_state.y_test
+        pca_obj = st.session_state.pca
+        if pca_obj is not None:
+            fig_pca, ax_pca = plt.subplots(figsize=(8, 4))
+            ax_pca.plot(range(1, len(pca_obj.explained_variance_ratio_) + 1),
+                        np.cumsum(pca_obj.explained_variance_ratio_), 'o-', color='#2E86AB', linewidth=2, markersize=8)
+            ax_pca.set_xlabel("主成分数", fontsize=11)
+            ax_pca.set_ylabel("累计解释方差比", fontsize=11)
+            ax_pca.set_title("PCA 累计解释方差比", fontsize=12, fontweight='bold')
+            ax_pca.grid(alpha=0.4)
+            ax_pca.set_facecolor('#fafafa')
+            plt.tight_layout()
+            st.pyplot(fig_pca)
+            plt.close()
+
+    # ---------------------- 11. 多模型对比与选优 ----------------------
+    st.subheader("9️⃣ 多模型 5 折 CV 与测试集验证")
+    if not st.session_state.dim_done:
+        st.warning("请先完成「执行降维」再建模。")
     else:
-        st.info(f"🔍 检测到 {len(numeric_cols)} 个数值型特征：{', '.join(numeric_cols)}")
+        X_train_pca = st.session_state.X_train_pca
+        X_test_pca = st.session_state.X_test_pca
+        y_train = st.session_state.y_train
+        y_test = st.session_state.y_test
 
-        # ---------------------- 5. 描述性统计 ----------------------
-        st.subheader("2. 描述性统计结果")
-        tab1, tab2 = st.tabs(["基础统计", "缺失值/异常值"])
+        # Stacking 类（与 p9.3 一致）
+        class ManualStackingRegressor(BaseEstimator, RegressorMixin):
+            def __init__(self, base_models, meta_model, cv=5):
+                self.base_models = base_models
+                self.meta_model = meta_model
+                self.cv = cv
+                self.fitted_base_models = {}
+                self.cv_splitter = KFold(n_splits=cv, shuffle=True, random_state=42)
 
-        with tab1:
-            # 特征列的描述性统计（不含yield）
-            desc_stats = df[numeric_cols].describe().T
-            desc_stats['中位数'] = [round(df[col].median(), 4) for col in numeric_cols]
-            desc_stats['变异系数'] = [round(desc_stats.loc[col, 'std'] / desc_stats.loc[col, 'mean'], 4)
-                                  if desc_stats.loc[col, 'mean'] != 0 else 0
-                                  for col in numeric_cols]
-            st.dataframe(desc_stats, use_container_width=True)
+            def fit(self, X, y):
+                X = np.asarray(X)
+                y = np.asarray(y).ravel()
+                X_meta = np.zeros((X.shape[0], len(self.base_models)))
+                for idx, (name, model) in enumerate(self.base_models.items()):
+                    fold_preds = np.zeros(X.shape[0])
+                    for tr_idx, val_idx in self.cv_splitter.split(X):
+                        model.fit(X[tr_idx], y[tr_idx])
+                        fold_preds[val_idx] = model.predict(X[val_idx])
+                    X_meta[:, idx] = fold_preds
+                    self.fitted_base_models[name] = model.fit(X, y)
+                self.meta_model.fit(X_meta, y)
+                self.is_fitted_ = True
+                return self
 
-        with tab2:
-            # 缺失值统计
-            missing_stats = pd.DataFrame({
-                "缺失值数量": df.isnull().sum(),
-                "缺失率(%)": [round((v / len(df) * 100), 4) for v in df.isnull().sum()]
-            })
-            st.subheader("缺失值统计")
-            st.dataframe(missing_stats, use_container_width=True)
+            def predict(self, X):
+                X = np.asarray(X)
+                X_meta = np.column_stack([m.predict(X) for m in self.fitted_base_models.values()])
+                return self.meta_model.predict(X_meta)
 
-            # 异常值统计（IQR法）
-            st.subheader("异常值统计（IQR法）")
-            outlier_stats = {}
-            for col in numeric_cols:
-                Q1 = df[col].quantile(0.25)
-                Q3 = df[col].quantile(0.75)
-                IQR = Q3 - Q1
-                lower = Q1 - 1.5 * IQR
-                upper = Q3 + 1.5 * IQR
-                outlier_num = len(df[(df[col] < lower) | (df[col] > upper)])
-                outlier_stats[col] = {
-                    "异常值数量": outlier_num,
-                    "异常值占比(%)": round(outlier_num / len(df) * 100, 4),
-                    "下界": round(lower, 4),
-                    "上界": round(upper, 4)
-                }
-            outlier_df = pd.DataFrame(outlier_stats).T
-            st.dataframe(outlier_df, use_container_width=True)
+        base_models = {
+            'xgb': XGBRegressor(n_estimators=100, random_state=42) if HAS_XGB else RandomForestRegressor(n_estimators=100, random_state=42),
+            'lgb': LGBMRegressor(n_estimators=100, random_state=42, verbose=-1) if HAS_LGB else RandomForestRegressor(n_estimators=100, random_state=43),
+            'rf': RandomForestRegressor(n_estimators=100, random_state=42)
+        }
+        meta_model = LassoCV(cv=5, max_iter=10000)
+        stacking = ManualStackingRegressor(base_models=base_models, meta_model=meta_model, cv=5) if (HAS_XGB or HAS_LGB) else None
 
-        # ---------------------- 6. 变量可视化（直方图+箱线图选择） ----------------------
-        st.subheader("3. 变量可视化（直方图+箱线图）")
-        selected_var = st.selectbox("请选择要查看的变量", options=numeric_cols, index=0)
+        models_dict = {
+            "LassoCV": LassoCV(cv=5, max_iter=10000),
+            "随机森林": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
+            "线性回归": LinearRegression(),
+            "MLP": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
+        }
+        if HAS_XGB:
+            models_dict["XGBoost"] = XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42)
+        if HAS_LGB:
+            models_dict["LightGBM"] = LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1)
+        if stacking is not None:
+            models_dict["Stacking"] = stacking
 
-        if st.button("生成直方图 & 箱线图", type="primary"):
-            # 双列布局展示图表
-            col1, col2 = st.columns(2)
-            # 直方图
-            with col1:
-                fig1, ax1 = plt.subplots(figsize=(10, 6))
-                sns.histplot(df[selected_var].dropna(), kde=True, bins=30, color='skyblue', ax=ax1)
-                ax1.set_title(f"{selected_var} 分布直方图", fontsize=12, fontweight='bold')
-                ax1.set_xlabel(selected_var, fontsize=10)
-                ax1.set_ylabel("频数", fontsize=10)
-                ax1.grid(axis='y', alpha=0.3)
-                st.pyplot(fig1)
-            # 箱线图
-            with col2:
-                fig2, ax2 = plt.subplots(figsize=(10, 6))
-                sns.boxplot(x=df[selected_var].dropna(), color='lightcoral', ax=ax2,
-                            flierprops={'marker': 'o', 'markerfacecolor': 'red', 'markersize': 5})
-                median = df[selected_var].median()
-                ax2.set_title(f"{selected_var} 箱线图（中位数：{median:.2f}）", fontsize=12, fontweight='bold')
-                ax2.set_xlabel(selected_var, fontsize=10)
-                ax2.grid(axis='x', alpha=0.3)
-                st.pyplot(fig2)
+        if st.button("运行 5 折交叉验证并选优"):
+            kf = KFold(n_splits=5, shuffle=True, random_state=42)
+            cv_res = {}
+            with st.spinner("正在运行各模型 CV..."):
+                for name, model in models_dict.items():
+                    t0 = time.time()
+                    r2_scores = cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='r2')
+                    mae_scores = -cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='neg_mean_absolute_error')
+                    cv_res[name] = {
+                        "CV平均R²": round(np.mean(r2_scores), 4),
+                        "CV R²标准差": round(np.std(r2_scores), 4),
+                        "CV平均MAE": round(np.mean(mae_scores), 4),
+                        "CV耗时(s)": round(time.time() - t0, 2)
+                    }
+            df_cv = pd.DataFrame(cv_res).T.reset_index().rename(columns={'index': '模型'})
+            df_cv = df_cv.sort_values(by=["CV平均R²", "CV R²标准差"], ascending=[False, True])
+            best_name = df_cv.iloc[0]["模型"]
+            best_model = models_dict[best_name]
+            best_model.fit(X_train_pca, y_train)
+            y_pred = best_model.predict(X_test_pca)
+            test_r2 = round(r2_score(y_test, y_pred), 4)
+            test_mae = round(mean_absolute_error(y_test, y_pred), 4)
+            test_rmse = round(np.sqrt(mean_squared_error(y_test, y_pred)), 4)
 
-        # ---------------------- 7. 相关性热力图 ----------------------
-        st.subheader("4. 特征相关性热力图")
-        corr_matrix = df[numeric_cols].corr()
-        fig, ax = plt.subplots(figsize=(12, 8))
-        sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
-        ax.set_title("特征相关性热力图", fontsize=14, fontweight='bold')
-        st.pyplot(fig)
+            st.session_state.best_model = best_model
+            st.session_state.best_model_name = best_name
+            st.session_state.model_trained = True
+            st.session_state.y_pred = y_pred
 
-        # ---------------------- 8. 自动建模与预测（无global，用session_state） ----------------------
-        if 'yield' in df.columns and st.checkbox("🔧 开启自动建模与产量预测", value=False):
-            st.subheader("5. 自动建模与产量预测")
+            st.metric("最优模型", best_name)
+            st.dataframe(df_cv, use_container_width=True)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("测试集 R²", test_r2)
+            c2.metric("测试集 MAE", test_mae)
+            c3.metric("测试集 RMSE", test_rmse)
 
-            # 数据预处理（无泄露流程）
-            with st.spinner("正在进行数据预处理..."):
-                df_labeled = df[df['yield'].notna()].copy()
-                X = df_labeled[numeric_cols]  # 用所有特征
-                y = df_labeled['yield']
+            # 美化：CV R² 柱状图
+            fig_cv, ax_cv = plt.subplots(figsize=(10, 5))
+            x_pos = np.arange(len(df_cv))
+            colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(df_cv)))
+            bars = ax_cv.bar(x_pos, df_cv["CV平均R²"].values, yerr=df_cv["CV R²标准差"].values,
+                             capsize=5, color=colors, edgecolor='#333', linewidth=0.8)
+            ax_cv.set_xticks(x_pos)
+            ax_cv.set_xticklabels(df_cv["模型"].values, rotation=35, ha='right')
+            ax_cv.set_ylabel("CV 平均 R²", fontsize=11)
+            ax_cv.set_title("各模型 5 折交叉验证 R² 对比", fontsize=13, fontweight='bold')
+            ax_cv.set_ylim(0, 1.05)
+            ax_cv.grid(axis='y', alpha=0.4)
+            ax_cv.set_facecolor('#fafafa')
+            plt.tight_layout()
+            st.pyplot(fig_cv)
+            plt.close()
 
-                # 拆分训练集/验证集
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=0.3, random_state=42
-                )
+            # 美化：真实 vs 预测
+            fig_scatter, ax_scatter = plt.subplots(figsize=(7, 5))
+            ax_scatter.scatter(y_test, y_pred, alpha=0.7, c='#2E86AB', edgecolors='white', s=60)
+            mi, ma = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
+            ax_scatter.plot([mi, ma], [mi, ma], 'r--', lw=2, label='理想线')
+            ax_scatter.set_xlabel("真实产量", fontsize=11)
+            ax_scatter.set_ylabel("预测产量", fontsize=11)
+            ax_scatter.set_title(f"{best_name} 测试集：真实 vs 预测", fontsize=12, fontweight='bold')
+            ax_scatter.legend()
+            ax_scatter.grid(alpha=0.4)
+            ax_scatter.set_facecolor('#fafafa')
+            plt.tight_layout()
+            st.pyplot(fig_scatter)
+            plt.close()
 
-                # 缺失值填充规则（存入session_state）
-                fill_rules = {col: round(X_train[col].median(), 4) for col in numeric_cols}
-                st.session_state.fill_rules = fill_rules
-                X_train_filled = X_train.fillna(fill_rules)
-                X_val_filled = X_val.fillna(fill_rules)
+    # ---------------------- 12. 单样本预测 ----------------------
+    st.subheader("🔟 单样本产量预测")
+    if not st.session_state.model_trained:
+        st.warning("请先完成「运行 5 折交叉验证并选优」再进行预测。")
+    else:
+        feat_list = getattr(st.session_state, 'pred_feature_cols', None) or [c for c in FEATURE_ORDER if c in (st.session_state.train_clean or st.session_state.train_df).columns and c != 'yield']
+        st.markdown(f"输入 {len(feat_list)} 个特征值（将自动标准化并降维后预测）。")
+        input_vals = {}
+        cols_per_row = 3
+        _train = st.session_state.train_clean if st.session_state.train_clean is not None else st.session_state.train_df
+        X_tr_ref = _train[feat_list] if _train is not None else pd.DataFrame()
+        for i in range(0, len(feat_list), cols_per_row):
+            row_cols = st.columns(cols_per_row)
+            for j, col in enumerate(feat_list[i:i + cols_per_row]):
+                default = float(X_tr[col].median())
+                default = float(X_tr_ref[col].median()) if (len(X_tr_ref) > 0 and col in X_tr_ref.columns) else 0.0
+                input_vals[col] = row_cols[j].number_input(col, value=default, step=0.01, key=f"pred_{col}")
 
-                # 标准化（存入session_state）
-                scaler = StandardScaler()
-                scaler.fit(X_train_filled)  # 仅训练集拟合
-                st.session_state.scaler = scaler
-                X_train_scaled = scaler.transform(X_train_filled)
-                X_val_scaled = scaler.transform(X_val_filled)
-
-            # 选择模型
-            model_type = st.radio("选择建模算法", ["随机森林回归", "线性回归"], index=0)
-            if st.button("开始训练模型", type="secondary"):
-                with st.spinner("正在训练模型..."):
-                    # 训练模型（存入session_state）
-                    if model_type == "随机森林回归":
-                        model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-                    else:
-                        model = LinearRegression()
-                    model.fit(X_train_scaled, y_train)
-                    st.session_state.model = model
-                    st.session_state.model_trained = True  # 标记模型已训练
-
-                    # 模型评估
-                    y_val_pred = model.predict(X_val_scaled)
-                    r2 = round(r2_score(y_val, y_val_pred), 4)
-                    mae = round(mean_absolute_error(y_val, y_val_pred), 4)
-                    rmse = round(np.sqrt(mean_squared_error(y_val, y_val_pred)), 4)
-
-                    # 展示评估结果
-                    st.subheader("模型评估结果")
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("R² 得分", f"{r2}")
-                    col2.metric("MAE（平均绝对误差）", f"{mae}")
-                    col3.metric("RMSE（均方根误差）", f"{rmse}")
-
-                    # 预测vs真实值可视化
-                    fig, ax = plt.subplots(figsize=(8, 6))
-                    ax.scatter(y_val, y_val_pred, alpha=0.6, color='orange')
-                    ax.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
-                    ax.set_xlabel("真实产量", fontsize=10)
-                    ax.set_ylabel("预测产量", fontsize=10)
-                    ax.set_title(f"{model_type} 预测效果", fontsize=12, fontweight='bold')
-                    st.pyplot(fig)
-
-                    # 特征重要性（仅随机森林）
-                    if model_type == "随机森林回归":
-                        st.subheader("特征重要性排序")
-                        importance = pd.DataFrame({
-                            "特征": numeric_cols,
-                            "重要性": [round(v, 4) for v in model.feature_importances_]
-                        }).sort_values("重要性", ascending=False)
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        sns.barplot(x="重要性", y="特征", data=importance.head(10), ax=ax)
-                        ax.set_title("Top10 特征重要性", fontsize=12, fontweight='bold')
-                        st.pyplot(fig)
-
-            # ---------------------- 9. 单样本预测（所有特征输入） ----------------------
-            st.subheader("6. 单样本产量预测")
-            if not st.session_state.model_trained:
-                st.warning("⚠️ 请先训练模型后再进行预测！")
-            else:
-                st.markdown(f"⚠️ 请输入所有 {len(numeric_cols)} 个特征值（确保和训练时一致）")
-
-                # 生成所有特征的输入框（分栏展示）
-                input_features = {}
-                cols_per_row = 3
-                rows = [numeric_cols[i:i + cols_per_row] for i in range(0, len(numeric_cols), cols_per_row)]
-
-                for row in rows:
-                    input_cols = st.columns(cols_per_row)
-                    for idx, col in enumerate(row):
-                        default_val = round(df[col].median(), 4)
-                        input_features[col] = input_cols[idx].number_input(
-                            f"输入{col}值",
-                            value=float(default_val),
-                            step=0.01,
-                            key=col
-                        )
-
-                # 转换为DataFrame（特征顺序一致）
-                input_df = pd.DataFrame([input_features], columns=numeric_cols)
-                # 填充缺失值（用session_state中的规则）
-                input_df = input_df.fillna(st.session_state.fill_rules)
-                # 标准化（用session_state中的scaler）
-                input_scaled = st.session_state.scaler.transform(input_df)
-
-                # 预测按钮
-                if st.button("预测产量", type="primary"):
-                    try:
-                        pred_yield = st.session_state.model.predict(input_scaled)[0]
-                        st.success(f"✅ 预测产量为：{round(pred_yield, 2)}")
-                    except Exception as e:
-                        st.error(f"❌ 预测失败：{str(e)}")
+        if st.button("预测产量", type="primary"):
+            try:
+                X_in = pd.DataFrame([input_vals], columns=feat_list)
+                X_s = st.session_state.scaler.transform(X_in)
+                pca_obj = st.session_state.pca
+                sel = st.session_state.selector
+                if pca_obj is not None:
+                    X_s = pca_obj.transform(X_s)
+                elif sel is not None:
+                    X_s = sel.transform(X_s)
+                pred = st.session_state.best_model.predict(X_s)[0]
+                st.success(f"预测产量：**{round(pred, 2)}**")
+            except Exception as e:
+                st.error(f"预测失败：{e}")
 
 else:
-    st.info("💡 请先上传CSV格式的蓝莓数据集（支持特征：clonesize、honeybee、bumbles、osmia、fruitset、yield等）")
+    st.info("请上传 CSV 或确保默认路径存在 data.csv 后刷新。")
