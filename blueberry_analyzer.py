@@ -155,6 +155,22 @@ def _setup_matplotlib_chinese():
     matplotlib.rcParams['axes.unicode_minus'] = False
 
 _setup_matplotlib_chinese()
+
+# 图表中文：用字体文件直接生成 FontProperties，绘图时传入避免标题/轴标签方框乱码
+def _get_chinese_font():
+    import matplotlib.font_manager as fm
+    win_root = os.environ.get('SYSTEMROOT', os.environ.get('WINDIR', 'C:\\Windows'))
+    for name, f in [('msyh.ttc', 11), ('simhei.ttf', 11), ('simsun.ttc', 11)]:
+        path = os.path.join(win_root, 'Fonts', name)
+        if path and os.path.isfile(path):
+            try:
+                return fm.FontProperties(fname=path)
+            except Exception:
+                continue
+    return None
+
+_CHINESE_FONT = _get_chinese_font()
+
 plt.rcParams['axes.unicode_minus'] = False
 plt.rcParams['figure.facecolor'] = 'white'
 plt.rcParams['axes.facecolor'] = '#fafafa'
@@ -266,8 +282,8 @@ ax_box.boxplot(
     medianprops=dict(color='#E94B3C', linewidth=2),
     flierprops=dict(marker='o', markerfacecolor='#95a5a6', markersize=4, alpha=0.7)
 )
-ax_box.set_ylabel("数值", fontsize=11)
-ax_box.set_title(f"{box_var} 箱线图（中位数：{df[box_var].median():.2f}）", fontsize=12, fontweight='bold')
+ax_box.set_ylabel("数值", fontsize=11, fontproperties=_CHINESE_FONT)
+ax_box.set_title(f"{box_var} 箱线图（中位数：{df[box_var].median():.2f}）", fontsize=12, fontweight='bold', fontproperties=_CHINESE_FONT)
 ax_box.grid(axis='y', alpha=0.4, linestyle='--')
 ax_box.set_facecolor('#fafafa')
 plt.tight_layout()
@@ -286,10 +302,10 @@ with col1:
     mu, sigma = data.mean(), data.std()
     x = np.linspace(data.min(), data.max(), 200)
     ax_hist.plot(x, stats.norm.pdf(x, mu, sigma), 'b--', linewidth=1.5, label='正态拟合')
-    ax_hist.set_title(f'{norm_var} 分布', fontsize=12, fontweight='bold')
-    ax_hist.set_xlabel(norm_var, fontsize=10)
-    ax_hist.set_ylabel('密度', fontsize=10)
-    ax_hist.legend(fontsize=9)
+    ax_hist.set_title(f'{norm_var} 分布', fontsize=12, fontweight='bold', fontproperties=_CHINESE_FONT)
+    ax_hist.set_xlabel(norm_var, fontsize=10, fontproperties=_CHINESE_FONT)
+    ax_hist.set_ylabel('密度', fontsize=10, fontproperties=_CHINESE_FONT)
+    ax_hist.legend(fontsize=9, prop=_CHINESE_FONT)
     ax_hist.grid(alpha=0.4, linestyle='--')
     ax_hist.set_facecolor('#fafafa')
     plt.tight_layout()
@@ -298,9 +314,9 @@ with col1:
 with col2:
     fig_qq, ax_qq = plt.subplots(figsize=(7, 4))
     stats.probplot(train_df[norm_var].dropna(), plot=ax_qq, rvalue=True)
-    ax_qq.set_title(f'{norm_var} Q-Q 图', fontsize=12, fontweight='bold')
-    ax_qq.set_xlabel('理论分位数', fontsize=10)
-    ax_qq.set_ylabel('样本分位数', fontsize=10)
+    ax_qq.set_title(f'{norm_var} Q-Q 图', fontsize=12, fontweight='bold', fontproperties=_CHINESE_FONT)
+    ax_qq.set_xlabel('理论分位数', fontsize=10, fontproperties=_CHINESE_FONT)
+    ax_qq.set_ylabel('样本分位数', fontsize=10, fontproperties=_CHINESE_FONT)
     ax_qq.grid(alpha=0.4, linestyle='--')
     ax_qq.set_facecolor('#fafafa')
     plt.tight_layout()
@@ -385,9 +401,9 @@ sns.heatmap(
     cbar_kws={'shrink': 0.8, 'label': 'Pearson 相关系数'},
     annot_kws={'size': 8}
 )
-ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9)
-ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
-ax_corr.set_title("特征相关性热力图（训练集）", fontsize=14, fontweight='bold', pad=12)
+ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9, fontproperties=_CHINESE_FONT)
+    ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9, fontproperties=_CHINESE_FONT)
+    ax_corr.set_title("特征相关性热力图（训练集）", fontsize=14, fontweight='bold', pad=12, fontproperties=_CHINESE_FONT)
 plt.tight_layout()
 st.pyplot(fig_corr)
 plt.close()
@@ -440,9 +456,9 @@ if st.session_state.dim_done:
         fig_pca, ax_pca = plt.subplots(figsize=(8, 4))
         ax_pca.plot(range(1, len(pca_obj.explained_variance_ratio_) + 1),
                     np.cumsum(pca_obj.explained_variance_ratio_), 'o-', color='#2E86AB', linewidth=2, markersize=8)
-        ax_pca.set_xlabel("主成分数", fontsize=11)
-        ax_pca.set_ylabel("累计解释方差比", fontsize=11)
-        ax_pca.set_title("PCA 累计解释方差比", fontsize=12, fontweight='bold')
+        ax_pca.set_xlabel("主成分数", fontsize=11, fontproperties=_CHINESE_FONT)
+        ax_pca.set_ylabel("累计解释方差比", fontsize=11, fontproperties=_CHINESE_FONT)
+        ax_pca.set_title("PCA 累计解释方差比", fontsize=12, fontweight='bold', fontproperties=_CHINESE_FONT)
         ax_pca.grid(alpha=0.4)
         ax_pca.set_facecolor('#fafafa')
         plt.tight_layout()
@@ -491,20 +507,19 @@ else:
         'rf': RandomForestRegressor(n_estimators=100, random_state=42)
     }
     meta_model = LassoCV(cv=5, max_iter=10000)
-    stacking = ManualStackingRegressor(base_models=base_models, meta_model=meta_model, cv=5) if (HAS_XGB or HAS_LGB) else None
+    stacking = ManualStackingRegressor(base_models=base_models, meta_model=meta_model, cv=5)
 
     models_dict = {
         "LassoCV": LassoCV(cv=5, max_iter=10000),
         "随机森林": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
         "线性回归": LinearRegression(),
         "MLP": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
+        "Stacking": stacking,
     }
     if HAS_XGB:
         models_dict["XGBoost"] = XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42)
     if HAS_LGB:
         models_dict["LightGBM"] = LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1)
-    if stacking is not None:
-        models_dict["Stacking"] = stacking
 
     model_names = list(models_dict.keys())
     selected_models = st.multiselect(
@@ -578,9 +593,9 @@ else:
         ax_cv.bar(x_pos, df_cv["CV平均R²"].values, yerr=df_cv["CV R²标准差"].values,
                  capsize=5, color=colors, edgecolor='#333', linewidth=0.8)
         ax_cv.set_xticks(x_pos)
-        ax_cv.set_xticklabels(df_cv["模型"].values, rotation=35, ha='right')
-        ax_cv.set_ylabel("CV 平均 R²", fontsize=11)
-        ax_cv.set_title("各模型 5 折交叉验证 R² 对比", fontsize=13, fontweight='bold')
+        ax_cv.set_xticklabels(df_cv["模型"].values, rotation=35, ha='right', fontproperties=_CHINESE_FONT)
+        ax_cv.set_ylabel("CV 平均 R²", fontsize=11, fontproperties=_CHINESE_FONT)
+        ax_cv.set_title("各模型 5 折交叉验证 R² 对比", fontsize=13, fontweight='bold', fontproperties=_CHINESE_FONT)
         ax_cv.set_ylim(0, 1.05)
         ax_cv.grid(axis='y', alpha=0.4)
         ax_cv.set_facecolor('#fafafa')
@@ -592,10 +607,10 @@ else:
         ax_scatter.scatter(y_test, y_pred, alpha=0.7, c='#2E86AB', edgecolors='white', s=60)
         mi, ma = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
         ax_scatter.plot([mi, ma], [mi, ma], 'r--', lw=2, label='理想线')
-        ax_scatter.set_xlabel("真实产量", fontsize=11)
-        ax_scatter.set_ylabel("预测产量", fontsize=11)
-        ax_scatter.set_title(f"{best_name} 测试集：真实 vs 预测", fontsize=12, fontweight='bold')
-        ax_scatter.legend()
+        ax_scatter.set_xlabel("真实产量", fontsize=11, fontproperties=_CHINESE_FONT)
+        ax_scatter.set_ylabel("预测产量", fontsize=11, fontproperties=_CHINESE_FONT)
+        ax_scatter.set_title(f"{best_name} 测试集：真实 vs 预测", fontsize=12, fontweight='bold', fontproperties=_CHINESE_FONT)
+        ax_scatter.legend(prop=_CHINESE_FONT)
         ax_scatter.grid(alpha=0.4)
         ax_scatter.set_facecolor('#fafafa')
         plt.tight_layout()
