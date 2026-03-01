@@ -98,18 +98,63 @@ st.set_page_config(
     layout="wide"
 )
 
-# 中文乱码修复：整页使用支持中文的字体
+# 页面美化 + 中文字体
 st.markdown("""
 <style>
+    /* 全局字体 */
     body, .stApp, [data-testid="stAppViewContainer"], p, span, div, label, input {
         font-family: "Microsoft YaHei", "微软雅黑", "SimHei", "SimSun", sans-serif !important;
     }
     .stMetric label { font-family: "Microsoft YaHei", "SimHei", sans-serif !important; }
+    /* 页面背景与主区 */
+    .stApp { background: linear-gradient(180deg, #f0f4f8 0%, #e8eef4 100%); }
+    [data-testid="stAppViewContainer"] { padding: 1rem 2rem 2rem 2rem; max-width: 1400px; margin: 0 auto; }
+    /* 标题区 */
+    h1 { color: #1a365d !important; font-weight: 700 !important; padding-bottom: 0.5rem !important; border-bottom: 2px solid #2E86AB !important; margin-bottom: 0.5rem !important; }
+    /* 小节标题 */
+    h2, h3 { color: #2c5282 !important; font-weight: 600 !important; margin-top: 1.2rem !important; }
+    .block-container { padding: 1rem 0 !important; }
+    /* 按钮 */
+    .stButton > button { 
+        border-radius: 8px; font-weight: 500; transition: all 0.2s; 
+        border: 1px solid #2E86AB; background: #2E86AB; color: white;
+    }
+    .stButton > button:hover { background: #1a5276; border-color: #1a5276; box-shadow: 0 2px 8px rgba(46,134,171,0.35); }
+    /* 成功/信息框 */
+    [data-testid="stAlert"] { border-radius: 8px; }
+    /* 指标卡片 */
+    [data-testid="stMetricValue"] { font-size: 1.25rem !important; color: #1a365d !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# 图表中文：优先微软雅黑/黑体，减少 matplotlib 中文乱码
-plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'KaiTi', 'sans-serif']
+# 图表标题/轴标签中文乱码：用字体文件路径显式注册并设为默认（Windows 优先）
+def _setup_matplotlib_chinese():
+    import matplotlib
+    import matplotlib.font_manager as fm
+    win_root = os.environ.get('SYSTEMROOT', os.environ.get('WINDIR', 'C:\\Windows'))
+    font_paths = [
+        os.path.join(win_root, 'Fonts', 'msyh.ttc'),
+        os.path.join(win_root, 'Fonts', 'msyhbd.ttc'),
+        os.path.join(win_root, 'Fonts', 'simhei.ttf'),
+        os.path.join(win_root, 'Fonts', 'simsun.ttc'),
+    ]
+    for path in font_paths:
+        if path and os.path.isfile(path):
+            try:
+                if hasattr(fm, 'fontManager') and hasattr(fm.fontManager, 'addfont'):
+                    fm.fontManager.addfont(path)
+                prop = fm.FontProperties(fname=path)
+                name = prop.get_name()
+                if name:
+                    matplotlib.rcParams['font.sans-serif'] = [name, 'Microsoft YaHei', 'SimHei', 'SimSun', 'sans-serif']
+                    matplotlib.rcParams['axes.unicode_minus'] = False
+                    return
+            except Exception:
+                continue
+    matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'KaiTi', 'sans-serif']
+    matplotlib.rcParams['axes.unicode_minus'] = False
+
+_setup_matplotlib_chinese()
 plt.rcParams['axes.unicode_minus'] = False
 plt.rcParams['figure.facecolor'] = 'white'
 plt.rcParams['axes.facecolor'] = '#fafafa'
@@ -161,8 +206,8 @@ else:
     df = default_df
     data_source = default_label if default_label else "无可用数据"
 
-st.title("🫐 蓝莓产量分析全流程系统（项目0227 v2）")
-st.markdown("上传数据或使用默认数据 → 划分 → 描述统计/箱线图 → 正态性/异常值 → 相关性 → 降维 → 多模型对比 → 预测")
+st.title("🫐 蓝莓产量分析全流程系统")
+st.caption("数据上传 → 划分 → 描述统计 / 箱线图 → 正态性 / 异常值 → 相关性 → 降维 → 多模型对比 → 预测")
 
 if df is None or df.empty:
     st.warning("未上传文件且未找到可用的默认 data.csv，请上传 CSV 或将 data.csv 放在脚本同目录/项目目录下。")
@@ -461,20 +506,51 @@ else:
     if stacking is not None:
         models_dict["Stacking"] = stacking
 
-    if st.button("运行 5 折交叉验证并选优"):
+    model_names = list(models_dict.keys())
+    selected_models = st.multiselect(
+        "选择要参与交叉验证的模型（不选则全部运行）",
+        options=model_names,
+        default=model_names,
+        key="cv_model_select"
+    )
+    if not selected_models:
+        selected_models = model_names
+
+    if st.button("运行 5 折交叉验证并选优", type="primary"):
         kf = KFold(n_splits=5, shuffle=True, random_state=42)
         cv_res = {}
-        with st.spinner("正在运行各模型 CV..."):
-            for name, model in models_dict.items():
-                t0 = time.time()
-                r2_scores = cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='r2')
-                mae_scores = -cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='neg_mean_absolute_error')
-                cv_res[name] = {
-                    "CV平均R²": round(np.mean(r2_scores), 4),
-                    "CV R²标准差": round(np.std(r2_scores), 4),
-                    "CV平均MAE": round(np.mean(mae_scores), 4),
-                    "CV耗时(s)": round(time.time() - t0, 2)
-                }
+        n = len(selected_models)
+        try:
+            progress_bar = st.progress(0, text="准备中…")
+        except TypeError:
+            progress_bar = st.progress(0)
+        status_placeholder = st.empty()
+
+        for i, name in enumerate(selected_models):
+            status_placeholder.info(f"🔄 正在训练：**{name}**（{i+1}/{n}）")
+            try:
+                progress_bar.progress((i + 1) / n, text=f"已完成 {i+1}/{n} 个模型")
+            except TypeError:
+                progress_bar.progress((i + 1) / n)
+            model = models_dict[name]
+            t0 = time.time()
+            r2_scores = cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='r2')
+            mae_scores = -cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='neg_mean_absolute_error')
+            cv_res[name] = {
+                "CV平均R²": round(np.mean(r2_scores), 4),
+                "CV R²标准差": round(np.std(r2_scores), 4),
+                "CV平均MAE": round(np.mean(mae_scores), 4),
+                "CV耗时(s)": round(time.time() - t0, 2)
+            }
+
+        try:
+            progress_bar.progress(1.0, text="全部完成")
+        except TypeError:
+            progress_bar.progress(1.0)
+        status_placeholder.success("✅ 所有选中模型训练完成")
+        time.sleep(0.3)
+        status_placeholder.empty()
+        progress_bar.empty()
         df_cv = pd.DataFrame(cv_res).T.reset_index().rename(columns={'index': '模型'})
         df_cv = df_cv.sort_values(by=["CV平均R²", "CV R²标准差"], ascending=[False, True])
         best_name = df_cv.iloc[0]["模型"]
