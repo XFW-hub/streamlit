@@ -402,8 +402,8 @@ sns.heatmap(
     annot_kws={'size': 8}
 )
 ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9, fontproperties=_CHINESE_FONT)
-    ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9, fontproperties=_CHINESE_FONT)
-    ax_corr.set_title("特征相关性热力图（训练集）", fontsize=14, fontweight='bold', pad=12, fontproperties=_CHINESE_FONT)
+ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9, fontproperties=_CHINESE_FONT)
+ax_corr.set_title("特征相关性热力图（训练集）", fontsize=14, fontweight='bold', pad=12, fontproperties=_CHINESE_FONT)
 plt.tight_layout()
 st.pyplot(fig_corr)
 plt.close()
