@@ -405,8 +405,8 @@ sns.heatmap(
     annot_kws={'size': 8}
 )
 ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9)
-    ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
-    ax_corr.set_title("Feature Correlation Heatmap (Training Set)", fontsize=14, fontweight='bold', pad=12)
+ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
+ax_corr.set_title("Feature Correlation Heatmap (Training Set)", fontsize=14, fontweight='bold', pad=12)
 plt.tight_layout()
 st.pyplot(fig_corr)
 plt.close()
