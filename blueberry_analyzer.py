@@ -154,7 +154,10 @@ def _setup_matplotlib_chinese():
     matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'KaiTi', 'sans-serif']
     matplotlib.rcParams['axes.unicode_minus'] = False
 
-_setup_matplotlib_chinese()
+# 图表已统一为英文，使用西文字体避免方框乱码（不再默认用中文字体）
+plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Liberation Sans', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
+# _setup_matplotlib_chinese()  # 不再设为全局默认，避免英文也变方框
 
 # 图表中文：用字体文件直接生成 FontProperties，绘图时传入避免标题/轴标签方框乱码
 def _get_chinese_font():
@@ -402,8 +405,8 @@ sns.heatmap(
     annot_kws={'size': 8}
 )
 ax_corr.set_xticklabels(ax_corr.get_xticklabels(), rotation=45, ha='right', fontsize=9)
-ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
-ax_corr.set_title("Feature Correlation Heatmap (Training Set)", fontsize=14, fontweight='bold', pad=12)
+    ax_corr.set_yticklabels(ax_corr.get_yticklabels(), rotation=0, fontsize=9)
+    ax_corr.set_title("Feature Correlation Heatmap (Training Set)", fontsize=14, fontweight='bold', pad=12)
 plt.tight_layout()
 st.pyplot(fig_corr)
 plt.close()
@@ -511,8 +514,8 @@ else:
 
     models_dict = {
         "LassoCV": LassoCV(cv=5, max_iter=10000),
-        "随机森林": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
-        "线性回归": LinearRegression(),
+        "Random Forest": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
+        "Linear Regression": LinearRegression(),
         "MLP": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
         "Stacking": stacking,
     }
