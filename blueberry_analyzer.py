@@ -21,7 +21,7 @@ from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.decomposition import PCA
 from sklearn.feature_selection import SelectKBest, f_regression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression, LassoCV
+from sklearn.linear_model import LassoCV
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -264,31 +264,53 @@ test_df = st.session_state.test_df
 if train_df is None or test_df is None:
     st.stop()
 
-# ---------------------- 4. 描述性统计 ----------------------
+# ---------------------- 4. 描述性统计（三线表） ----------------------
 st.subheader("2️⃣ 描述性统计")
 desc = df[feature_cols].describe().T
 desc['中位数'] = [round(df[col].median(), 4) for col in feature_cols]
 desc['偏度'] = [round(df[col].skew(), 3) for col in feature_cols]
 desc['峰度'] = [round(df[col].kurt(), 3) for col in feature_cols]
 desc['变异系数'] = [round(desc.loc[col, 'std'] / desc.loc[col, 'mean'], 4) if desc.loc[col, 'mean'] != 0 else 0 for col in feature_cols]
-st.dataframe(desc.style.background_gradient(subset=['mean', 'std'], cmap='Blues').format("{:.4f}", subset=desc.columns), use_container_width=True)
-
-# ---------------------- 5. 箱线图 ----------------------
-st.subheader("3️⃣ 箱线图")
-box_var = st.selectbox("选择变量绘制箱线图", options=feature_cols, index=0)
-fig_box, ax_box = plt.subplots(figsize=(8, 4))
-ax_box.boxplot(
-    df[box_var].dropna(), patch_artist=True,
-    boxprops=dict(facecolor='#2E86AB', color='#1a5276', linewidth=1.2),
-    whiskerprops=dict(color='#1a5276'),
-    capprops=dict(color='#1a5276'),
-    medianprops=dict(color='#E94B3C', linewidth=2),
-    flierprops=dict(marker='o', markerfacecolor='#95a5a6', markersize=4, alpha=0.7)
+# 三线表：顶线、表头下第二条线、底线加粗
+style_three_line = [
+    {"selector": "table", "props": [("border-top", "2px solid #333"), ("border-bottom", "2px solid #333")]},
+    {"selector": "thead th", "props": [("border-bottom", "2px solid #333")]},
+    {"selector": "tbody tr:last-child td", "props": [("border-bottom", "2px solid #333")]},
+]
+st.dataframe(
+    desc.style.format("{:.4f}", subset=desc.columns).set_table_styles(style_three_line),
+    use_container_width=True
 )
-ax_box.set_ylabel("Value", fontsize=11)
-ax_box.set_title(f"{box_var} Boxplot (Median: {df[box_var].median():.2f})", fontsize=12, fontweight='bold')
-ax_box.grid(axis='y', alpha=0.4, linestyle='--')
-ax_box.set_facecolor('#fafafa')
+
+# ---------------------- 5. 箱线图（全部变量，4 列） ----------------------
+st.subheader("3️⃣ 箱线图")
+n_features = len(feature_cols)
+n_cols = 4
+n_rows = (n_features + n_cols - 1) // n_cols
+# 每子图宽约 3.2、高约 2.6，总图美观
+fig_w = min(14, n_cols * 3.2)
+fig_h = max(4, n_rows * 2.6)
+fig_box, axes_box = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
+if n_rows == 1:
+    axes_box = axes_box.reshape(1, -1)
+for idx, col in enumerate(feature_cols):
+    r, c = idx // n_cols, idx % n_cols
+    ax = axes_box[r, c]
+    ax.boxplot(
+        df[col].dropna(), patch_artist=True,
+        boxprops=dict(facecolor='#2E86AB', color='#1a5276', linewidth=1.2),
+        whiskerprops=dict(color='#1a5276'),
+        capprops=dict(color='#1a5276'),
+        medianprops=dict(color='#E94B3C', linewidth=2),
+        flierprops=dict(marker='o', markerfacecolor='#95a5a6', markersize=3, alpha=0.7)
+    )
+    ax.set_title(col, fontsize=10, fontweight='bold')
+    ax.set_ylabel("Value", fontsize=9)
+    ax.grid(axis='y', alpha=0.4, linestyle='--')
+    ax.set_facecolor('#fafafa')
+for j in range(idx + 1, n_rows * n_cols):
+    r, c = j // n_cols, j % n_cols
+    axes_box[r, c].set_visible(False)
 plt.tight_layout()
 st.pyplot(fig_box)
 plt.close()
@@ -478,6 +500,7 @@ else:
     y_train = st.session_state.y_train
     y_test = st.session_state.y_test
 
+    # 与 p9.3 一致的 Stacking 类（含 _get_tags 便于 cross_val_score clone）
     class ManualStackingRegressor(BaseEstimator, RegressorMixin):
         def __init__(self, base_models, meta_model, cv=5):
             self.base_models = base_models
@@ -485,25 +508,37 @@ else:
             self.cv = cv
             self.fitted_base_models = {}
             self.cv_splitter = KFold(n_splits=cv, shuffle=True, random_state=42)
+
         def fit(self, X, y):
-            X = np.asarray(X)
-            y = np.asarray(y).ravel()
-            X_meta = np.zeros((X.shape[0], len(self.base_models)))
+            X = np.array(X) if isinstance(X, pd.DataFrame) else np.asarray(X)
+            y = np.array(y).ravel() if isinstance(y, (pd.Series, pd.DataFrame)) else np.asarray(y).ravel()
+            X_meta_train = np.zeros((X.shape[0], len(self.base_models)))
             for idx, (name, model) in enumerate(self.base_models.items()):
                 fold_preds = np.zeros(X.shape[0])
-                for tr_idx, val_idx in self.cv_splitter.split(X):
-                    model.fit(X[tr_idx], y[tr_idx])
-                    fold_preds[val_idx] = model.predict(X[val_idx])
-                X_meta[:, idx] = fold_preds
+                for train_idx, val_idx in self.cv_splitter.split(X):
+                    X_tr, X_val = X[train_idx], X[val_idx]
+                    y_tr = y[train_idx]
+                    model.fit(X_tr, y_tr)
+                    fold_preds[val_idx] = model.predict(X_val)
+                X_meta_train[:, idx] = fold_preds
                 self.fitted_base_models[name] = model.fit(X, y)
-            self.meta_model.fit(X_meta, y)
+            self.meta_model.fit(X_meta_train, y)
             self.is_fitted_ = True
             return self
-        def predict(self, X):
-            X = np.asarray(X)
-            X_meta = np.column_stack([m.predict(X) for m in self.fitted_base_models.values()])
-            return self.meta_model.predict(X_meta)
 
+        def predict(self, X):
+            if not hasattr(self, 'is_fitted_'):
+                raise ValueError("模型未训练，请先调用fit()")
+            X = np.array(X) if isinstance(X, pd.DataFrame) else np.asarray(X)
+            X_meta_test = np.zeros((X.shape[0], len(self.base_models)))
+            for idx, (name, model) in enumerate(self.fitted_base_models.items()):
+                X_meta_test[:, idx] = model.predict(X)
+            return self.meta_model.predict(X_meta_test)
+
+        def _get_tags(self):
+            return {'regressor': True, 'multioutput': False, 'requires_fit': True, 'pairwise': False, 'stateless': False, 'X_types': ['2darray']}
+
+    # 基模型（缺 XGB/LGB 时用 RF 替代，保证 Stacking 一定能跑）
     base_models = {
         'xgb': XGBRegressor(n_estimators=100, random_state=42) if HAS_XGB else RandomForestRegressor(n_estimators=100, random_state=42),
         'lgb': LGBMRegressor(n_estimators=100, random_state=42, verbose=-1) if HAS_LGB else RandomForestRegressor(n_estimators=100, random_state=43),
@@ -512,17 +547,15 @@ else:
     meta_model = LassoCV(cv=5, max_iter=10000)
     stacking = ManualStackingRegressor(base_models=base_models, meta_model=meta_model, cv=5)
 
+    # 与 p9.3 一致的 6 个模型，缺库时用 RF 替代，保证都能跑
     models_dict = {
-        "LassoCV": LassoCV(cv=5, max_iter=10000),
-        "Random Forest": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
-        "Linear Regression": LinearRegression(),
-        "MLP": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
-        "Stacking": stacking,
+        "LassoCV（L1正则回归）": LassoCV(cv=5, max_iter=10000),
+        "RandomForest（随机森林）": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
+        "XGBoost（梯度提升树）": XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42) if HAS_XGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=44),
+        "LightGBM（轻量梯度提升）": LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1) if HAS_LGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=45),
+        "MLP（多层感知机）": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
+        "Stacking（XGB+LGB+RF）": stacking,
     }
-    if HAS_XGB:
-        models_dict["XGBoost"] = XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42)
-    if HAS_LGB:
-        models_dict["LightGBM"] = LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1)
 
     model_names = list(models_dict.keys())
     selected_models = st.multiselect(
