@@ -24,7 +24,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LassoCV
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 
 warnings.filterwarnings('ignore')
 
@@ -538,21 +538,21 @@ else:
         def _get_tags(self):
             return {'regressor': True, 'multioutput': False, 'requires_fit': True, 'pairwise': False, 'stateless': False, 'X_types': ['2darray']}
 
-    # 基模型（缺 XGB/LGB 时用 RF 替代，保证 Stacking 一定能跑）
+    # 基模型（缺 XGB/LGB 时用 RF 替代，保证 Stacking 一定能跑）；n_jobs 加速
     base_models = {
-        'xgb': XGBRegressor(n_estimators=100, random_state=42) if HAS_XGB else RandomForestRegressor(n_estimators=100, random_state=42),
-        'lgb': LGBMRegressor(n_estimators=100, random_state=42, verbose=-1) if HAS_LGB else RandomForestRegressor(n_estimators=100, random_state=43),
-        'rf': RandomForestRegressor(n_estimators=100, random_state=42)
+        'xgb': XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1) if HAS_XGB else RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
+        'lgb': LGBMRegressor(n_estimators=100, random_state=42, verbose=-1, n_jobs=-1) if HAS_LGB else RandomForestRegressor(n_estimators=100, random_state=43, n_jobs=-1),
+        'rf': RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
     }
     meta_model = LassoCV(cv=5, max_iter=10000)
     stacking = ManualStackingRegressor(base_models=base_models, meta_model=meta_model, cv=5)
 
-    # 与 p9.3 一致的 6 个模型，缺库时用 RF 替代，保证都能跑
+    # 与 p9.3 一致的 6 个模型，缺库时用 RF 替代，保证都能跑；树模型加 n_jobs 加速
     models_dict = {
         "LassoCV（L1正则回归）": LassoCV(cv=5, max_iter=10000),
-        "RandomForest（随机森林）": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
-        "XGBoost（梯度提升树）": XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42) if HAS_XGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=44),
-        "LightGBM（轻量梯度提升）": LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1) if HAS_LGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=45),
+        "RandomForest（随机森林）": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42, n_jobs=-1),
+        "XGBoost（梯度提升树）": XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1) if HAS_XGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=44, n_jobs=-1),
+        "LightGBM（轻量梯度提升）": LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, num_leaves=31, subsample=0.8, random_state=42, verbose=-1, n_jobs=-1) if HAS_LGB else RandomForestRegressor(n_estimators=200, max_depth=6, random_state=45, n_jobs=-1),
         "MLP（多层感知机）": MLPRegressor(hidden_layer_sizes=(128, 64, 32), activation='relu', solver='adam', max_iter=1000, random_state=42),
         "Stacking（XGB+LGB+RF）": stacking,
     }
@@ -577,20 +577,30 @@ else:
             progress_bar = st.progress(0)
         status_placeholder = st.empty()
 
+        X_train_pca_np = np.asarray(X_train_pca)
+        y_train_np = np.asarray(y_train).ravel()
         for i, name in enumerate(selected_models):
-            status_placeholder.info(f"🔄 正在训练：**{name}**（{i+1}/{n}）")
-            try:
-                progress_bar.progress((i + 1) / n, text=f"已完成 {i+1}/{n} 个模型")
-            except TypeError:
-                progress_bar.progress((i + 1) / n)
             model = models_dict[name]
             t0 = time.time()
-            r2_scores = cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='r2')
-            mae_scores = -cross_val_score(model, X_train_pca, y_train, cv=kf, scoring='neg_mean_absolute_error')
+            r2_list, mae_list = [], []
+            for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(X_train_pca_np)):
+                status_placeholder.info(f"🔄 **{name}**（模型 {i+1}/{n}，第 {fold_idx+1}/5 折）")
+                try:
+                    progress_bar.progress((i * 5 + fold_idx + 1) / (n * 5), text=f"{name} 第 {fold_idx+1}/5 折")
+                except TypeError:
+                    progress_bar.progress((i * 5 + fold_idx + 1) / (n * 5))
+                X_tr, X_val = X_train_pca_np[tr_idx], X_train_pca_np[val_idx]
+                y_tr, y_val = y_train_np[tr_idx], y_train_np[val_idx]
+                from sklearn.metrics import r2_score as _r2, mean_absolute_error as _mae
+                model_clone = clone(model)
+                model_clone.fit(X_tr, y_tr)
+                pred = model_clone.predict(X_val)
+                r2_list.append(_r2(y_val, pred))
+                mae_list.append(_mae(y_val, pred))
             cv_res[name] = {
-                "CV平均R²": round(np.mean(r2_scores), 4),
-                "CV R²标准差": round(np.std(r2_scores), 4),
-                "CV平均MAE": round(np.mean(mae_scores), 4),
+                "CV平均R²": round(float(np.mean(r2_list)), 4),
+                "CV R²标准差": round(float(np.std(r2_list)), 4),
+                "CV平均MAE": round(float(np.mean(mae_list)), 4),
                 "CV耗时(s)": round(time.time() - t0, 2)
             }
 
